@@ -1,0 +1,199 @@
+<!--
+@license
+Copyright (c) 2015 The Polymer Project Authors. All rights reserved.
+This code may only be used under the BSD style license found at http://polymer.github.io/LICENSE.txt
+The complete set of authors may be found at http://polymer.github.io/AUTHORS.txt
+The complete set of contributors may be found at http://polymer.github.io/CONTRIBUTORS.txt
+Code distributed by Google as part of the polymer project is also
+subject to an additional IP rights grant found at http://polymer.github.io/PATENTS.txt
+-->
+
+<link rel="import" href="../../bower_components/polymer/polymer.html">
+
+<dom-module id="o-data">
+  <template>
+    <style>
+      :host {
+        display: block;
+      }
+    </style>
+  </template>
+  <script>
+    (function() {
+      'use strict';
+
+      Polymer({
+        is: 'o-data',
+
+        properties: {
+          user: {
+            type: Object,
+            notify: true,
+            value: {}
+          },
+
+          subject: {
+            type: Object,
+            notify: true,
+            value: {}
+          },
+
+          documents: {
+            type: Object,
+            value: {}
+          },
+
+          _suportedRelations: {
+            type: Object,
+            value: {
+              rev: ['role:contributor', 'role:assignee', 'actor'],
+              rel: ['goal']
+            }
+          }
+        },
+        observers: [
+          'onUserChange(user.*)',
+          'onSubjectChange(subject.*)',
+          'onUserActivityChange(user.activities.*)'
+        ],
+
+        //maps data from the web to the internal representation
+        processResource: function(resource) {
+          var self = this;
+          return this.fetchResource(resource.id).then(function(doc) {
+              //FIXME: dont override resource;
+              resource = _.find(doc['@graph'], function(item) {
+                return item.id == resource.id;
+              });
+              resource['@reverse'] = {};
+              return self.fetchResourceContainers(doc);
+            })
+            .then(function(containers) {
+              containers.forEach(function(container) {
+                var property = _.intersection(self._suportedRelations.rel, container.rel)[0];
+                if (property) {
+                  resource[property] = container.contains;
+                } else {
+                  property = _.intersection(self._suportedRelations.rev, container.rev)[0];
+                  resource['@reverse'][property] = container.contains;
+                }
+              });
+              return resource;
+            })
+        },
+        onUserActivityChange: function(changeRecord) {
+          if (changeRecord.path == 'user.activities.length') {
+            var added = _.filter(this.user.activities, function(activity) {
+              return !activity.id;
+            });
+          }
+        },
+        onUserChange: function(changeRecord) {
+          if (changeRecord.path === 'user.id') {
+            var resource = {
+              id: changeRecord.value
+            };
+            var self = this;
+            return this.processResource(resource)
+              .then(function(resource) {
+                self.user = resource;
+                self.set('subject.id', self.user.id); //FIXME
+                return resource;
+              });
+          }
+        },
+        onSubjectChange: function(changeRecord) {
+          if (changeRecord.path === 'subject.id') {
+            var resource = {
+              id: changeRecord.value
+            };
+            var self = this;
+            return this.processResource(resource)
+              .then(function(resource) {
+                self.subject = resource;
+                return resource;
+              });
+          }
+        },
+
+        fetchResource: function(url) {
+          return fetch(url)
+            .then(function(response) {
+              return response.json();
+            });
+        },
+
+        fetchResourceContainers: function(resourceDoc) {
+          var self = this;
+
+          //FIXME use json-ld expansion instead
+          resourceDoc['@graph'].forEach(function (item) {
+            if (item.rev && typeof(item.rev) === 'string') {
+              item.rev = [item.rev];
+            }
+            if (item.rel && typeof(item.rel) === 'string') {
+              item.rel = [item.rel];
+            }
+
+            if (item.type && typeof(item.type) === 'string') {
+              item.type = [item.type];
+            }
+          });
+          var containers = _.filter(resourceDoc['@graph'], function(item) {
+            if (item.type && item.type.indexOf('Container') >= 0) {
+              return _.intersection(item.rel, self._suportedRelations.rel).length || _.intersection(item.rev, self._suportedRelations.rev).length;
+            }
+            return false;
+          });
+
+          return Promise.all(containers.map(this.fetchContainer.bind(this)));
+        },
+
+        fetchContainer: function(containerLink) {
+          var self = this;
+
+          return this.fetchResource(containerLink.id)
+            .then(function(doc) {
+              self.documents[containerLink.id] = doc;
+              var container = _.find(doc['@graph'], function(item) {
+                return item.id === containerLink.id;
+              });
+              return self.fetchContainerResources(container)
+            })
+            .then(function(resources) {
+              var container = containerLink;
+              container.contains = resources;
+              return container;
+            });
+        },
+
+        fetchContainerResources: function(container) {
+          var self = this;
+          //get list of "links" of resources to fetch
+          var elements = container.contains;
+          //fetch documents descibing these resources
+          return Promise.all(elements.map(function(element) {
+              return self.fetchResource(element);
+            }))
+            //return array of objects in original order
+            .then(function(documents) {
+              //for each element we need to find corresponding document returned from Promise.all
+              return elements.map(function(id) {
+                //now find the document describing the resource
+                var outerDoc = _.find(documents, function(doc) {
+                  //pick object representing the resource
+                  return _.find(doc['@graph'], function(item) {
+                    return item.id === id;
+                  });
+                });
+
+                return _.find(outerDoc['@graph'], function(item) {
+                  return item.id === id;
+                });
+              });
+            });
+        }
+      });
+    })();
+  </script>
+</dom-module>
